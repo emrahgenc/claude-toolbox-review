@@ -10,8 +10,15 @@ applied). n is the sample size behind the value; with too few episodes a verdict
 Names:
   skill:<skill>:pushes_per_episode            git push commands per episode (mean)
   skill:<skill>:writes_without_approval       outward writes with no approval or menu answer before them (sum)
-  skill:<skill>:corrections_per_episode       typed corrections, interrupts and denials per episode (mean)
-  skill:<skill>:first_turn_cost_median        the skill's own run cost (cost_index, median)
+  skill:<skill>:corrections_per_episode       typed corrections, interrupts and denials per episode (mean); only
+                                              those within the first followup_window replies count (later ones
+                                              are often other work in the same session)
+  skill:<skill>:first_turn_cost_median        the skill's own run cost, main thread only (cost_index, median)
+  skill:<skill>:first_turn_total_cost_median  the same plus the subagents the run started (median); use this one to
+                                              judge "move work into a subagent", which moves cost rather than
+                                              removing it. Episodes collected before subagent costs were recorded
+                                              are left out (n says how many count)
+  skill:<skill>:subagent_cost_median          cost of the subagents an episode started (median, same caveat)
   skill:<skill>:largest_result_median         the largest single tool result in an episode, chars (median)
   agent:<type>:failed                         failed delegations to this agent type in the run's period
   always_loaded_tokens | always_loaded:<part> every-session load (inventory.json), tokens or a part's chars
@@ -55,20 +62,42 @@ def episodes(run_dir, skill, after=None, before=None):
     return out
 
 
+WINDOW = int(CFG.config().get("followup_window", 3))
+
+# How each metric is counted today. A ledger target remembers the rule its baseline was counted with; when the rule
+# changes, the baseline is counted again from its run (or flagged), so a new rule never looks like an improvement.
+RULES = {"corrections_per_episode": "followup-window-%d" % WINDOW,
+         "first_turn_total_cost_median": "subagents-1", "subagent_cost_median": "subagents-1"}
+
+
+def rule(name):
+    return RULES.get(name.split(":")[-1]) if name.startswith("skill:") else None
+
+
+def late(g):
+    # Episode files from before the follow-up window carry no "late" mark: judge them by n, the same way.
+    return g.get("late", (g.get("n") or 0) > WINDOW)
+
+
 def corrections(e):
-    return len([g for g in e.get("signals", []) if g.get("class") == "correction"
-                or (not g.get("class") and g.get("kind") in ("user", "midturn", "interrupt", "denial"))])
+    return len([g for g in e.get("signals", []) if not late(g) and (g.get("class") == "correction"
+                or (not g.get("class") and g.get("kind") in ("user", "midturn", "interrupt", "denial")))])
+
+
+def subagent_eps(eps):
+    """Episodes collected after subagent costs were recorded (older ones would look free)."""
+    return [e for e in eps if "first_turn_total" in (e.get("tokens") or {})]
 
 
 def compute(run_dir, name, after=None, before=None):
     """Return (value, n). value is None when the run has nothing to measure."""
     parts = name.split(":")
-    if parts[0] == "skill" and len(parts) == 3:
-        eps = episodes(run_dir, parts[1], after, before)
+    if parts[0] == "skill" and len(parts) >= 3:   # plugin skills contain ':' (plugin:skill)
+        eps = episodes(run_dir, ":".join(parts[1:-1]), after, before)
         n = len(eps)
         if not eps:
             return None, 0
-        what = parts[2]
+        what = parts[-1]
         if what == "pushes_per_episode":
             return round(sum((e.get("actions") or {}).get("git_push", 0) for e in eps) / float(n), 2), n
         if what == "writes_without_approval":
@@ -77,6 +106,13 @@ def compute(run_dir, name, after=None, before=None):
             return round(sum(corrections(e) for e in eps) / float(n), 2), n
         if what == "first_turn_cost_median":
             return int(statistics.median(e["tokens"]["first_turn"]["cost_index"] for e in eps)), n
+        if what in ("first_turn_total_cost_median", "subagent_cost_median"):
+            sub = subagent_eps(eps)
+            if not sub:
+                return None, 0
+            if what == "first_turn_total_cost_median":
+                return int(statistics.median(e["tokens"]["first_turn_total"] for e in sub)), len(sub)
+            return int(statistics.median(e["tokens"]["subagents"]["episode"]["cost_index"] for e in sub)), len(sub)
         if what == "largest_result_median":
             return int(statistics.median(max([r["chars"] for r in e.get("largest_results", [])] or [0]) for e in eps)), n
         raise SystemExit("unknown skill metric: " + what)

@@ -95,9 +95,11 @@ def main():
     if eps:
         corr = sum((v.get("signal_classes") or {}).get("correction", 0) for v in skills.values())
         info(rows, "corrections_per_episode", "Corrections per skill run", round(corr / float(eps), 2), "%d runs" % eps)
-        costly = sorted(((k, v.get("first_turn_cost_median", 0)) for k, v in skills.items() if v.get("episodes")),
-                        key=lambda kv: -kv[1])[:3]
-        info(rows, "costliest_skills", "Costliest skills (run median, thousands)", costly[0][1] // 1000 if costly else 0,
+        # The run's own cost plus the subagents it started; older runs have only the first.
+        costly = sorted(((k, v.get("first_turn_total_cost_median", v.get("first_turn_cost_median", 0)))
+                         for k, v in skills.items() if v.get("episodes")), key=lambda kv: -kv[1])[:3]
+        info(rows, "costliest_skills", "Costliest skills (run median incl. subagents, thousands)",
+             costly[0][1] // 1000 if costly else 0,
              ", ".join("%s %dk" % (k, c // 1000) for k, c in costly))
         unapproved = sum((v.get("actions") or {}).get("writes_without_approval", 0) for v in skills.values())
         info(rows, "writes_without_approval", "Outward writes without an approval before them", unapproved,

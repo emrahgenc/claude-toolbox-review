@@ -20,5 +20,6 @@
   "prod_guard_words": ["kubectl", "prod"],
   "watchers": [],
   "evidence_folders": [],
-  "commit_prefix": ""
+  "commit_prefix": "",
+  "followup_window": 3
 }

@@ -22,6 +22,7 @@ plugin defaults **key by key**, so plugin updates never overwrite your choices. 
 | `watchers` | `[]` | Long-running helpers to health-check: `{name, status_file, error_file, max_age_minutes}` |
 | `evidence_folders` | `[]` | Folders of raw evidence (incident logs, exports) whose subfolders should not outlive their use: `{path, max_age_days}` (default 14); older subfolders are flagged for deletion |
 | `commit_prefix` | `""` | Prefix for commits the review makes when applying a change (e.g. a ticket id your hooks require) |
+| `followup_window` | `3` | How many of your typed replies after a skill runs can still count as corrections of it. Later replies stay in the episode (marked late) for the reviewer, but are often other work in the same session, so they do not count |
 | `approval_words` | (built-in English + Turkish list) | Extra words that count as "approved" when you answer a proposal |
 | `fix_words` | (fix, revert, lint, typo …) | Extra commit-subject words that mark a commit as a fix |
 

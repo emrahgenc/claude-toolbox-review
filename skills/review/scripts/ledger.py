@@ -96,7 +96,10 @@ def metrics(summary, component):
         cpe = s.get("corrections_per_episode")   # newer runs: only real corrections, approvals excluded
         return {"episodes": eps, "corrections_per_episode": cpe if cpe is not None else (round(bad / eps, 2) if eps else None),
                 "first_turn_cost_median": s.get("first_turn_cost_median"),
-                "first_turn_calls_median": s.get("first_turn_calls_median")}
+                "first_turn_total_cost_median": s.get("first_turn_total_cost_median"),
+                "first_turn_calls_median": s.get("first_turn_calls_median"),
+                # how corrections were counted (None = before the follow-up window): only like counts compare
+                "followup_window": summary.get("followup_window")}
     a = summary.get("usage", {}).get("agents", {}).get(component)
     if a is not None:
         return {"episodes": a.get("runs", 0), "failed": a.get("failed", 0),
@@ -247,7 +250,8 @@ def cmd_target(a):
     before = parse_iso(a.before or r.get("applied_at"))
     base, n = m.compute(run_dir, a.name, before=before)
     r["target_metric"] = {"name": a.name, "baseline": base, "baseline_n": n, "baseline_run": a.baseline_run,
-                          "goal": parse_value(a.goal), "direction": a.direction, "min_n": a.min_n}
+                          "goal": parse_value(a.goal), "direction": a.direction, "min_n": a.min_n,
+                          "rule": m.rule(a.name)}
     save(db)
     print("%s target %s: baseline %s (n=%s) -> goal %s (%s)" % (r["id"], a.name, base, n, a.goal, a.direction))
 
@@ -257,6 +261,16 @@ def target_verdict(r, run_dir, m):
     after = parse_iso(r.get("applied_at"))
     cur, n = m.compute(run_dir, tm["name"], after=after if tm["name"].startswith("skill:") else None)
     base, goal = tm.get("baseline"), tm.get("goal")
+    note = ""
+    if m.rule(tm["name"]) and tm.get("rule") != m.rule(tm["name"]):
+        # The measure is counted differently now: count the baseline again the same way, so the new rule is not
+        # mistaken for an improvement. Without the baseline run (retention), say so instead.
+        base_dir = os.path.join(DATA, "runs", tm.get("baseline_run") or "-")
+        if os.path.isdir(base_dir):
+            base, _ = m.compute(base_dir, tm["name"], before=after)
+            note = " (baseline recounted with the current rule)"
+        else:
+            note = " (baseline counted with an older rule; compare with care)"
     if cur is None and tm["name"].startswith("skill:"):
         return "target %s: not enough runs since the change yet (n=0, needs %s)" % (tm["name"], tm.get("min_n", 3))
     if cur is None:
@@ -267,7 +281,7 @@ def target_verdict(r, run_dir, m):
     reached = cur <= goal if down else cur >= goal
     worse = base is not None and ((cur > base * 1.2) if down else (cur < base * 0.8)) and cur != base
     word = "REACHED" if reached else ("REGRESSED" if worse else "not yet")
-    return "target %s: %s -> %s (goal %s, n=%s) %s" % (tm["name"], base, cur, goal, n, word)
+    return "target %s: %s -> %s (goal %s, n=%s) %s%s" % (tm["name"], base, cur, goal, n, word, note)
 
 
 def cmd_check(a):
@@ -292,14 +306,16 @@ def cmd_check(a):
             verdict = verdict or "no use in this period"
         else:
             notes = []
-            for k in ("first_turn_cost_median", "cost_median"):
+            for k in ("first_turn_cost_median", "first_turn_total_cost_median", "cost_median"):
                 if base.get(k) and cur.get(k) is not None:
                     d = (cur[k] - base[k]) / float(base[k])
                     notes.append("%s %+d%%" % (k.split("_median")[0], round(d * 100)))
                     if d > 0.2:
                         notes.append("COST UP")
             b, c = base.get("corrections_per_episode"), cur.get("corrections_per_episode")
-            if b is not None and c is not None:
+            if b is not None and c is not None and base.get("followup_window") != cur.get("followup_window"):
+                notes.append("corrections/ep not comparable (counting rule changed since the baseline)")
+            elif b is not None and c is not None:
                 notes.append("corrections/ep %.2f -> %.2f" % (b, c))
                 if c > b * 1.5 and c - b >= 0.5:
                     notes.append("MORE CORRECTIONS")

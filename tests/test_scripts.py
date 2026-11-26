@@ -114,6 +114,29 @@ class CollectTest(Base):
         self.assertRegex(eps[0]["id"], r"^\d{6}-\d{4}-0a1b2c3d$")
         self.assertEqual(eps[0]["args"], "quarterly")
 
+    def test_background_subagent_cost_is_charged_to_the_run_that_started_it(self):
+        ep = self.json(os.path.join("episodes", "kit__helper.json"))[0]
+        sub = ep["tokens"]["subagents"]
+        self.assertEqual(sub["runs"], 1)
+        self.assertEqual(sub["unresolved"], 0)
+        self.assertEqual(sub["by_type"], {"Explore": 1})
+        self.assertEqual(sub["episode"]["api_calls"], 3)       # the agent's two calls + the one agent it started
+        self.assertEqual(sub["first_turn"]["api_calls"], 3)    # started before the first typed reply
+        self.assertEqual(ep["tokens"]["first_turn_total"],
+                         ep["tokens"]["first_turn"]["cost_index"] + sub["first_turn"]["cost_index"])
+        row = self.json("summary.json")["skills"]["kit:helper"]
+        self.assertEqual(row["subagent_runs"], 1)
+        self.assertGreater(row["first_turn_total_cost_median"], row["first_turn_cost_median"])
+
+    def test_replies_after_the_followup_window_are_not_corrections(self):
+        row = self.json("summary.json")["skills"]["kit:helper"]
+        self.assertEqual(row["signal_classes"].get("correction"), 2)
+        self.assertEqual(row["late_signal_classes"].get("correction"), 2)
+        self.assertEqual(row["corrections_per_episode"], 2.0)
+        self.assertEqual(self.json("summary.json")["followup_window"], 3)
+        sig = self.json(os.path.join("episodes", "kit__helper.json"))[0]["signals"]
+        self.assertEqual([g["n"] for g in sig if g.get("late")], [4, 5])
+
     def test_feedback_memory_is_linked(self):
         fb = self.json("summary.json")["feedback_memories"]
         self.assertTrue(any("short-replies" in json.dumps(f) for f in fb), fb)
@@ -210,12 +233,56 @@ class MetricsExamsRetentionTest(Base):
         out = run("metrics.py", [self.run_dir, "skill:demo-skill:pushes_per_episode"], self.env).stdout.split()
         self.assertEqual(out, ["1.0", "1"])
 
+    def test_plugin_skill_metrics_and_cost_with_subagents(self):
+        m = lambda name: run("metrics.py", [self.run_dir, name], self.env).stdout.split()
+        self.assertEqual(m("skill:kit:helper:corrections_per_episode"), ["2.0", "1"])
+        total, own = m("skill:kit:helper:first_turn_total_cost_median"), m("skill:kit:helper:first_turn_cost_median")
+        self.assertEqual(int(total[0]) - int(own[0]), 3 * 3150)   # three subagent calls of 3150 each
+        self.assertEqual(m("skill:kit:helper:subagent_cost_median"), ["9450", "1"])
+
+    def test_old_episodes_are_judged_by_the_same_rule(self):
+        rd = os.path.join(self.tmp, "oldrun")
+        sig = lambda n: {"kind": "user", "n": n, "class": "correction"}
+        fakehome.write(os.path.join(rd, "episodes", "demo-skill.json"), json.dumps([
+            {"start": "2026-11-01T10:00:00Z", "signals": [sig(1), sig(5)], "tokens": {"first_turn": {"cost_index": 9}}}]))
+        m = lambda name: run("metrics.py", [rd, name], self.env).stdout.split()
+        self.assertEqual(m("skill:demo-skill:corrections_per_episode"), ["1.0", "1"])   # n=5 is past the window
+        self.assertEqual(m("skill:demo-skill:first_turn_total_cost_median"), ["None", "0"])   # would look free
+
     def test_exams_empty(self):
         run("exams.py", ["list"], self.env)
 
     def test_retention_dry_run_deletes_nothing(self):
         run("retention.py", [], self.env)
         self.assertTrue(os.path.isdir(os.path.join(self.run_dir, "episodes")))
+
+
+class LedgerRuleChangeTest(unittest.TestCase):
+    """A target whose baseline was counted before the follow-up window must not report the new rule as progress."""
+
+    def test_old_baseline_is_recounted_from_its_run(self):
+        tmp = tempfile.mkdtemp(prefix="toolbox-review-rule-")
+        try:
+            env, paths = fakehome.build(tmp)
+            run_id = "20261101-000000"
+            run_dir = os.path.join(paths["data"], "runs", run_id)
+            sig = lambda n: {"kind": "user", "n": n, "class": "correction"}
+            tokens = {"first_turn": {"cost_index": 9}}
+            fakehome.write(os.path.join(run_dir, "episodes", "demo-skill.json"), json.dumps([
+                {"start": "2026-11-01T10:00:00Z", "signals": [sig(1), sig(2), sig(4), sig(5), sig(6)], "tokens": tokens},
+                {"start": "2026-11-20T10:00:00Z", "signals": [sig(1)], "tokens": tokens}]))
+            fakehome.write(os.path.join(run_dir, "summary.json"), json.dumps({"skills": {}}))
+            target = {"name": "skill:demo-skill:corrections_per_episode", "baseline": 5.0, "baseline_n": 1,
+                      "baseline_run": run_id, "goal": 1, "direction": "down", "min_n": 1}   # no "rule": old target
+            fakehome.write(os.path.join(paths["data"], "ledger.json"), json.dumps({"meta": {}, "recs": [
+                {"id": "T1", "component": "demo-skill", "status": "applied",
+                 "applied_at": "2026-11-10T00:00:00+00:00", "target_metric": target}]}))
+            out = run("ledger.py", ["check", run_id], env).stdout
+            self.assertIn("2.0 -> 1.0", out)          # not 5.0 -> 1.0: the old count included later work
+            self.assertIn("recounted", out)
+            self.assertIn("REACHED", out)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
