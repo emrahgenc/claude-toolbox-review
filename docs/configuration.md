@@ -20,7 +20,7 @@ plugin defaults **key by key**, so plugin updates never overwrite your choices. 
 | `prod_markers` | kubectl, helm, terraform, "prod … deploy/delete" | Regexes for commands that touch production; the security sensor checks they are guarded by a hook or deny rule |
 | `prod_guard_words` | `["kubectl", "prod"]` | Words that identify a guard (hook command or deny rule) for those commands |
 | `watchers` | `[]` | Long-running helpers to health-check: `{name, status_file, error_file, max_age_minutes}` |
-| `evidence_folders` | `[]` | Folders that should keep receiving files (notes, exports): `{path, max_age_days}` |
+| `evidence_folders` | `[]` | Folders of raw evidence (incident logs, exports) whose subfolders should not outlive their use: `{path, max_age_days}` (default 14); older subfolders are flagged for deletion |
 | `commit_prefix` | `""` | Prefix for commits the review makes when applying a change (e.g. a ticket id your hooks require) |
 | `approval_words` | (built-in English + Turkish list) | Extra words that count as "approved" when you answer a proposal |
 | `fix_words` | (fix, revert, lint, typo …) | Extra commit-subject words that mark a commit as a fix |
