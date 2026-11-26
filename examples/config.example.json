@@ -1,0 +1,29 @@
+{
+  "_note": "Example only. Copy the keys you need into ~/.claude/toolbox-review/config.json. Keys starting with _ are comments.",
+  "language": "en",
+  "maintained": {
+    "auto_discover": true,
+    "plugin_dirs": ["~/code/my-claude-plugin"],
+    "extra_skill_dirs": [],
+    "exclude": ["my-plugin:experimental"]
+  },
+  "team_repos": ["~/code/team-service"],
+  "process_paths": [".sdlc/", "docs/decisions/"],
+  "forge": { "type": "gitlab", "host": "gitlab.example.com" },
+  "prod_markers": [
+    "kubectl\\s+(?:delete|exec|rollout|scale|apply|edit|patch|drain)",
+    "helm\\s+(?:upgrade|uninstall|rollback)",
+    "\\bprod(?:uction)?\\b[^\\n]{0,40}\\b(?:deploy|delete|restart|drop)\\b"
+  ],
+  "prod_guard_words": ["kubectl", "prod"],
+  "watchers": [
+    { "name": "inbox watcher", "status_file": "~/.local/state/inbox-watcher/status.json",
+      "error_file": "~/.local/state/inbox-watcher/error.log", "max_age_minutes": 30 }
+  ],
+  "evidence_folders": [
+    { "path": "~/Documents/incident-notes", "max_age_days": 30 }
+  ],
+  "commit_prefix": "",
+  "approval_words": ["ship it"],
+  "fix_words": ["hotfix"]
+}

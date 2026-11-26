@@ -1,0 +1,12 @@
+{
+  "_note": "Machine-readable twin of the budgets section of your CHARTER.md. Copy to ~/.claude/toolbox-review/budgets.json to change.",
+  "always_loaded_tokens": { "max": 6000, "target": 4000, "includes_deferred_tool_names": true },
+  "skill_md_lines": { "max": 500, "exceptions": {} },
+  "memory_index_lines": { "max": 200 },
+  "regression": { "corrections_increase_pct": 50, "cost_increase_pct": 20 },
+  "run_cost": { "weekly_max_analyses": 8, "monthly_max_analyses": 15 },
+  "complexity": { "additions_per_simplification": 3 },
+  "retention_days": 90,
+  "health": { "max_fail": 0 },
+  "security": { "max_fail": 0 }
+}

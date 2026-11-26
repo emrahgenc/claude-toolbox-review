@@ -1,0 +1,10 @@
+{
+  "name": "toolbox-review",
+  "version": "0.1.0",
+  "description": "Evidence-based, scheduled maintenance of your own Claude Code toolbox (skills, agents, hooks, memory, plugins, permissions): reads your transcripts and repositories locally, proposes fixes, form conversions and token savings, applies only what you approve and measures whether each change kept its promise.",
+  "author": { "name": "emrahgenc" },
+  "homepage": "https://github.com/emrahgenc/claude-toolbox-review",
+  "repository": "https://github.com/emrahgenc/claude-toolbox-review",
+  "license": "MIT",
+  "keywords": ["maintenance", "skills", "agents", "hooks", "token-optimization", "security", "evals"]
+}

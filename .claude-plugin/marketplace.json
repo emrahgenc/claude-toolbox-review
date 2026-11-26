@@ -1,0 +1,6 @@
+{
+  "name": "claude-toolbox-review",
+  "owner": { "name": "emrahgenc" },
+  "description": "Toolbox Review: keep your Claude Code skills, agents, hooks and settings healthy, cheap and safe, with evidence and your approval.",
+  "plugins": [{ "name": "toolbox-review", "source": "./" }]
+}

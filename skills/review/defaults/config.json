@@ -1,0 +1,24 @@
+{
+  "_note": "Plugin defaults. Copy only the keys you want to change into ~/.claude/toolbox-review/config.json; /toolbox-review:review setup writes a starting copy.",
+  "language": "auto",
+  "maintained": {
+    "auto_discover": true,
+    "plugin_dirs": [],
+    "extra_skill_dirs": [],
+    "exclude": []
+  },
+  "team_repos": [],
+  "process_paths": [],
+  "ai_trailer_pattern": "(?i)\\b(claude|anthropic)\\b",
+  "forge": { "type": "none", "host": "" },
+  "prod_markers": [
+    "kubectl\\s+(?:delete|exec|rollout|scale|apply|edit|patch|drain)",
+    "helm\\s+(?:upgrade|uninstall|rollback)",
+    "terraform\\s+(?:apply|destroy)",
+    "\\bprod(?:uction)?\\b[^\\n]{0,40}\\b(?:deploy|delete|restart|drop)\\b"
+  ],
+  "prod_guard_words": ["kubectl", "prod"],
+  "watchers": [],
+  "evidence_folders": [],
+  "commit_prefix": ""
+}
