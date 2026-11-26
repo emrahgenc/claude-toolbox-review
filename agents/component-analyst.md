@@ -34,10 +34,13 @@ not change files: you return a list of recommendations; the user decides.
    - `signals[]`: only what the user produced — `user` (a typed message), `midturn` (typed while work ran), `answer`
      (a choice in a question menu), `interrupt`, `denial` (a refused tool permission). `n` = how many typed replies
      came before it: **n=0** during the component's own run, **n=1** the first reaction (most valuable), a large `n`
-     may be other work. `reacting_to` = the assistant text the user reacted to. `class` = the collector's first guess
-     (approval | new_work | correction); verify it.
+     may be other work. `late: true` = past the follow-up window: not counted as a correction; treat it as a
+     correction only if `reacting_to` shows it is about this component's output. `reacting_to` = the assistant text
+     the user reacted to. `class` = the collector's first guess (approval | new_work | correction); verify it.
    - `tokens.first_turn` (from the call to the first typed reply: the component's own cost) and `tokens.episode`.
      `cost_index` = input-token equivalent (input 1, cache write 1.25/2, cache read 0.1, output 5).
+     `tokens.subagents` = the agents the run started (runs, by type, cost; `unresolved` = transcripts not found), and
+     `tokens.first_turn_total` = the run's cost **with** those agents.
    - `largest_results`, `repeated_reads`, `tool_errors`, `skill_load_chars`, `models`, `tools`, `actions`.
 3. In `summary.json`, read the component's row, the `usage` section (agent calls and costs, MCP, hooks) and related
    `feedback_memories`. Open those memory notes: each is a rule Claude derived from a correction.
@@ -75,7 +78,9 @@ with evidence:
 | browser/curl steps → MCP or CLI tool | Manual access to the same system is set up on every run |
 | merge / retire | Overlapping components · unused all period and not expected to be used |
 
-**3 · Tokens (same work, same output).** Goal: lower `first_turn.cost_index` without changing the output. Look at: is
+**3 · Tokens (same work, same output).** Goal: lower `first_turn_total` (the run plus its subagents) without changing
+the output. A move into a subagent or a cheaper model counts only when the total drops: a subagent keeps the main
+context small, but its own tokens are still paid. Look at: is
 SKILL.md loaded on every call and how much of it every path needs · is the same file read again and again
 (`repeated_reads`) · would a range or grep do instead of a full read · is a large tool output really needed · is
 deterministic work done by the model (→ script) · could read-heavy exploration go to a cheaper subagent · is a

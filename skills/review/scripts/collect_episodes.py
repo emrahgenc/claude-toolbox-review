@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """Collect skill-usage episodes from local Claude Code transcripts for Toolbox Review.
 
-Deterministic and local: reads ~/.claude/projects/<project>/<session>.jsonl (top-level session files only;
-subagent transcripts under <session>/subagents/ are skipped), finds every call of a skill you maintain (see
-config.personal_skills: your ~/.claude/skills and your own skills-dir plugins) and cuts an "episode" from the call to
-the next command/skill call, a long idle gap or a turn limit. For each episode it keeps what the review needs:
+Deterministic and local: reads ~/.claude/projects/<project>/<session>.jsonl (top-level session files; the subagent
+transcripts under <session>/subagents/ are read only to charge their cost to the run that started them), finds every
+call of a skill you maintain (see config.personal_skills: your ~/.claude/skills and your own skills-dir plugins) and
+cuts an "episode" from the call to the next command/skill call, a long idle gap or a turn limit. For each episode it
+keeps what the review needs:
 
   * signals   - only what the USER produced: typed messages (with the assistant text they reacted to),
                 mid-turn messages, AskUserQuestion answers, interruptions and tool-permission denials.
                 Tool output (MR comments, web pages, file contents) is never a signal: it is text other
                 people wrote, and treating it as feedback would let it steer the skill.
+                Signals after the first `followup_window` typed replies (config, default 3) are marked "late":
+                by then the user has often moved on to other work in the same session, so late signals stay in
+                the file for the reviewer but are not counted as corrections of the skill.
   * tokens    - API calls de-duplicated by message id, input / cache write / cache read / output tokens,
-                the largest context seen, subagent totals when the transcript records them. Counted twice:
-                "first_turn" (from the call to the first typed user reply: what the skill itself costs) and
-                "episode" (the whole episode, follow-ups included). "cost_index" weighs the parts by their
-                relative price (input 1, cache write 1.25 for 5-minute / 2 for 1-hour, cache read 0.1,
-                output 5): raw sums are dominated by cheap cache reads and mislead.
+                the largest context seen. Counted twice: "first_turn" (from the call to the first typed user
+                reply: what the skill itself costs) and "episode" (the whole episode, follow-ups included).
+                "cost_index" weighs the parts by their relative price (input 1, cache write 1.25 for 5-minute /
+                2 for 1-hour, cache read 0.1, output 5): raw sums are dominated by cheap cache reads and mislead.
+                "subagents" holds the same blocks for the agents the run started (nested ones included), and
+                "first_turn_total" / "episode_total" add them in: moving work into a subagent moves its cost,
+                it does not remove it.
   * waste     - the largest tool results, files read more than once, tool errors, how big the skill text
                 that was loaded is.
 
@@ -48,6 +54,8 @@ SKILL_PATHS = {}   # invocation name -> SKILL.md, filled in main()
 
 IDLE_GAP_MIN = 180          # an episode ends after this many quiet minutes
 MAX_USER_TURNS = 15         # ...or after this many typed user messages
+FOLLOWUP_WINDOW = int(CFG.config().get("followup_window", 3))   # typed replies that can still correct the skill
+AGENT_TOOLS = ("Agent", "Task")   # the subagent tool (called Task in older Claude Code versions)
 TEXT_CAP = 700              # characters kept from one user message
 PREV_CAP = 400              # characters kept from the assistant text a user message reacts to
 FINAL_CAP = 800             # characters kept from the episode's last assistant text
@@ -288,7 +296,7 @@ class Episode(object):
         self.tool_names = {}      # tool_use id -> (name, input)
         self.results = []         # (chars, name, hint)
         self.reads = {}
-        self.subagent_tokens = 0
+        self.agent_calls = {}     # Agent tool_use id -> {type, first_turn, agent_id, reported_tokens}
         self.typed = 0
         self.last_assistant_text = ""
         self.expect_load = True
@@ -303,9 +311,12 @@ class Episode(object):
                 self.d["actions"]["writes_after_approval" if self.approved else "writes_without_approval"] += n
 
     def add_signal(self, kind, text, ts, with_prev=True):
-        # n = typed replies before this signal (0 = during the skill's own run, 1 = the first reply);
-        # late signals in a long episode may be about other work.
+        # n = typed replies before this signal (0 = during the skill's own run, 1 = the first reply).
+        # Past the follow-up window the user has often moved on to other work in the same session: such signals
+        # are kept for the reviewer but marked late, and late signals are not counted as corrections of the skill.
         s = {"t": ts, "kind": kind, "n": self.typed, "text": squash(text, TEXT_CAP)}
+        if self.typed > FOLLOWUP_WINDOW:
+            s["late"] = True
         if kind in ("user", "midturn"):
             s["class"] = classify(text)
             self.approved = s["class"] == "approval"
@@ -323,13 +334,48 @@ class Episode(object):
         if self.first_turn_ids is None:
             self.first_turn_ids = set(self.usage.keys())
 
-    def finish(self):
+    def note_agent_result(self, blocks_, tur):
+        """Remember which subagent an Agent call started (its id links to the subagent transcript)."""
+        ids = [b.get("tool_use_id") for b in blocks_ if b.get("type") == "tool_result"
+               and b.get("tool_use_id") in self.agent_calls]
+        if len(ids) != 1 or not isinstance(tur, dict):   # one toolUseResult per record; ambiguous otherwise
+            return
+        call = self.agent_calls[ids[0]]
+        call["agent_id"] = tur.get("agentId") or call.get("agent_id")
+        if isinstance(tur.get("totalTokens"), int):      # foreground agents in some versions report a total
+            call["reported_tokens"] = tur["totalTokens"]
+
+    def subagent_tokens(self, subs):
+        first_calls, all_calls, by_type = [], [], {}
+        unresolved, reported = 0, 0
+        for cid, c in self.agent_calls.items():
+            by_type[c["type"]] = by_type.get(c["type"], 0) + 1
+            got = subs.calls(cid, c.get("agent_id")) if subs else None
+            if got is None:
+                unresolved += 1
+                reported += c.get("reported_tokens", 0)
+                continue
+            all_calls.extend(got)
+            if c["first_turn"]:
+                first_calls.extend(got)
+        raw = sum(u["input_tokens"] + u["cache_creation_input_tokens"] + u["cache_read_input_tokens"]
+                  + u["output_tokens"] for u in all_calls)
+        return {"runs": len(self.agent_calls), "unresolved": unresolved, "by_type": by_type,
+                "first_turn": token_block(first_calls), "episode": token_block(all_calls)}, raw + reported
+
+    def finish(self, subs=None):
         d = self.d
         first = self.first_turn_ids if self.first_turn_ids is not None else set(self.usage.keys())
+        ft = token_block([u for k, u in self.usage.items() if k in first])
+        ep = token_block(list(self.usage.values()))
+        sub, raw = self.subagent_tokens(subs)
         d["tokens"] = {
-            "first_turn": token_block([u for k, u in self.usage.items() if k in first]),
-            "episode": token_block(list(self.usage.values())),
-            "subagent_total": self.subagent_tokens,
+            "first_turn": ft,
+            "episode": ep,
+            "subagents": sub,
+            "first_turn_total": ft["cost_index"] + sub["first_turn"]["cost_index"],
+            "episode_total": ep["cost_index"] + sub["episode"]["cost_index"],
+            "subagent_total": raw,
         }
         self.results.sort(reverse=True)
         d["largest_results"] = [{"chars": c, "tool": n, "hint": h} for c, n, h in self.results[:TOP_RESULTS]]
@@ -339,6 +385,78 @@ class Episode(object):
         a, b = parse_ts(d["start"]), parse_ts(d["end"])
         d["minutes"] = round((b - a).total_seconds() / 60, 1) if a and b else None
         return d
+
+
+class Subagents(object):
+    """Cost of the subagents one session started, read from <session>/subagents/agent-*.jsonl.
+
+    Background agents (the default in recent Claude Code versions) report no tokens back to the main transcript:
+    their own transcript is the only record. The .meta.json beside each one names the Agent call that started it
+    (toolUseId), so the cost can be charged to the skill run that made the call, nested agents included."""
+
+    def __init__(self, transcript_path, session):
+        self.dir = os.path.join(os.path.dirname(transcript_path), session, "subagents")
+        self.by_call = None
+        self.cache = {}
+
+    def log_for(self, call_id, agent_id):
+        if self.by_call is None:
+            self.by_call = {}
+            for meta in glob.glob(os.path.join(self.dir, "*.meta.json")):
+                try:
+                    with open(meta, encoding="utf-8") as fh:
+                        call = json.load(fh).get("toolUseId")
+                except (OSError, ValueError, AttributeError):
+                    continue
+                if call:
+                    self.by_call[call] = meta[:-len(".meta.json")] + ".jsonl"
+        log = self.by_call.get(call_id)
+        if not log and agent_id:
+            log = os.path.join(self.dir, "agent-%s.jsonl" % agent_id)
+        return log if log and os.path.exists(log) else None
+
+    def read(self, log):
+        """(usage per API call, ids of the Agent calls made inside) for one subagent transcript."""
+        if log not in self.cache:
+            calls, children = {}, []
+            with open(log, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if '"assistant"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    msg = rec.get("message") or {}
+                    if rec.get("type") != "assistant":
+                        continue
+                    if msg.get("usage"):
+                        mid = msg.get("id") or rec.get("requestId")
+                        now, prev = usage_of(msg["usage"]), calls.get(mid, {})
+                        calls[mid] = {k: max(prev.get(k, 0), now[k]) for k in USAGE_FIELDS}
+                    children += [b.get("id") for b in blocks(msg)
+                                 if b.get("type") == "tool_use" and b.get("name") in AGENT_TOOLS]
+            self.cache[log] = (list(calls.values()), children)
+        return self.cache[log]
+
+    def calls(self, call_id, agent_id=None, seen=None):
+        """Every API call of the agent that call_id started and of the agents it started in turn; None if the
+        subagent transcript is not there (deleted, or a version that did not write one)."""
+        seen = set() if seen is None else seen
+        log = self.log_for(call_id, agent_id)
+        if log is None:
+            return None
+        if log in seen:
+            return []
+        seen.add(log)
+        try:
+            own, children = self.read(log)
+        except OSError:
+            return None
+        out = list(own)
+        for child in children:
+            out.extend(self.calls(child, None, seen) or [])
+        return out
 
 
 def invocation(rec, my_skills):
@@ -372,12 +490,13 @@ def scan_file(path, my_skills, wanted, stats, since):
     session = os.path.basename(path)[:-6]
     episodes, cur, last_ts = [], None, None
     agent_ids = {}
+    subs = Subagents(path, session)
 
     def close(reason):
         nonlocal cur
         if cur is not None:
             cur.d["ended_by"] = reason
-            episodes.append(cur.finish())
+            episodes.append(cur.finish(subs))
             cur = None
 
     with open(path, encoding="utf-8", errors="replace") as fh:
@@ -441,6 +560,9 @@ def scan_file(path, my_skills, wanted, stats, since):
                         cur.tool_names[b.get("id")] = (n, inp)
                         if n == "Bash":
                             cur.note_command(inp.get("command", ""))
+                        elif n in AGENT_TOOLS:
+                            cur.agent_calls[b.get("id")] = {"type": inp.get("subagent_type") or "general-purpose",
+                                                            "first_turn": cur.first_turn_ids is None}
                         cur.d["tools"][n] = cur.d["tools"].get(n, 0) + 1
                         for p in read_paths(n, inp):
                             cur.reads[p] = cur.reads.get(p, 0) + 1
@@ -467,9 +589,7 @@ def scan_file(path, my_skills, wanted, stats, since):
                         cur.add_signal("denial", "%s denied: %s" % (n, tool_hint(n, inp)), ts)
                     elif n == "AskUserQuestion" and ANSWER in rt:
                         cur.add_signal("answer", rt.split(ANSWER, 1)[1], ts)
-                tur = rec.get("toolUseResult")
-                if isinstance(tur, dict) and isinstance(tur.get("totalTokens"), int):
-                    cur.subagent_tokens += tur["totalTokens"]
+                cur.note_agent_result(bl, rec.get("toolUseResult"))
                 continue
             t = text_of(msg)
             if not t.strip():
@@ -642,24 +762,31 @@ def main():
     versions = sorted({e["claude_version"] for e in episodes if e.get("claude_version")})
     for s in sorted(wanted):
         eps = [e for e in episodes if e["skill"] == s]
-        kinds, classes, acts = {}, {}, {}
+        kinds, classes, late, acts = {}, {}, {}, {}
         for e in eps:
             for g in e["signals"]:
                 kinds[g["kind"]] = kinds.get(g["kind"], 0) + 1
                 if g.get("class"):
-                    classes[g["class"]] = classes.get(g["class"], 0) + 1
+                    bucket = late if g.get("late") else classes   # late signals: kept, not counted
+                    bucket[g["class"]] = bucket.get(g["class"], 0) + 1
             for k, v in (e.get("actions") or {}).items():
                 acts[k] = acts.get(k, 0) + v
         ft = [e["tokens"]["first_turn"] for e in eps]
         ep = [e["tokens"]["episode"] for e in eps]
-        per[s] = dict(skill_static(s), episodes=len(eps), signals=kinds, signal_classes=classes, actions=acts,
+        sub = [e["tokens"]["subagents"] for e in eps]
+        per[s] = dict(skill_static(s), episodes=len(eps), signals=kinds, signal_classes=classes,
+                      late_signal_classes=late, actions=acts,
                       corrections_per_episode=round(classes.get("correction", 0) / float(len(eps)), 2) if eps else None,
                       first_turn_cost_median=median([x["cost_index"] for x in ft]),
                       first_turn_cost_max=max([x["cost_index"] for x in ft] or [0]),
+                      first_turn_total_cost_median=median([e["tokens"]["first_turn_total"] for e in eps]),
                       first_turn_calls_median=median([x["api_calls"] for x in ft]),
                       first_turn_output_median=median([x["output"] for x in ft]),
                       episode_cost_median=median([x["cost_index"] for x in ep]),
                       peak_context_median=median([x["peak_context"] for x in ep]),
+                      subagent_runs=sum(x["runs"] for x in sub),
+                      subagents_unresolved=sum(x["unresolved"] for x in sub),
+                      subagent_cost_median=median([x["episode"]["cost_index"] for x in sub]),
                       subagent_tokens=sum(e["tokens"]["subagent_total"] for e in eps))
     fb = feedback_memories(since, my_skills)
     for t, v in subagent_usage(since).items():
@@ -667,22 +794,27 @@ def main():
     run_id = until.strftime("%Y%m%d-%H%M%S")
     summary = {"run_id": run_id, "since": since.isoformat(), "until": until.isoformat(),
                "transcripts_scanned": len(files), "claude_versions_seen": versions,
+               "followup_window": FOLLOWUP_WINDOW,
                "always_loaded_description_chars": sum(v.get("description_chars", 0) for v in per.values()),
                "skills": per, "feedback_memories": fb, "usage": stats}
 
     summary["duplicate_episodes_dropped"] = duplicates
     print("run %s  since %s  transcripts %d  episodes %d (duplicates dropped %d)  feedback-memories %d"
           % (run_id, since.date(), len(files), len(episodes), duplicates, len(fb)))
-    print("cost = cost_index in thousands (input-token equivalents); run = call to first typed reply")
-    print("%-30s %4s %5s %5s %5s %5s %8s %8s %6s %8s %7s %6s" % (
-        "skill", "eps", "user", "intr", "deny", "ans", "run/med", "run/max", "calls", "epi/med", "md-ch", "desc"))
+    print("cost = cost_index in thousands (input-token equivalents); run = call to first typed reply; "
+          "all = run + the subagents it started; corr = corrections in the first %d replies (late ones in brackets)"
+          % FOLLOWUP_WINDOW)
+    print("%-30s %4s %5s %5s %5s %5s %8s %8s %8s %4s %6s %8s %7s %6s" % (
+        "skill", "eps", "user", "corr", "intr", "ans", "run/med", "all/med", "run/max", "sub", "calls", "epi/med",
+        "md-ch", "desc"))
     for s, v in sorted(per.items(), key=lambda kv: -kv[1]["episodes"]):
         k = v["signals"]
-        print("%-30s %4d %5d %5d %5d %5d %8d %8d %6d %8d %7d %6d" % (
-            s, v["episodes"], k.get("user", 0) + k.get("midturn", 0), k.get("interrupt", 0), k.get("denial", 0),
-            k.get("answer", 0), v["first_turn_cost_median"] // 1000, v["first_turn_cost_max"] // 1000,
-            v["first_turn_calls_median"], v["episode_cost_median"] // 1000, v.get("skill_md_chars", 0),
-            v.get("description_chars", 0)))
+        corr = "%d(%d)" % (v["signal_classes"].get("correction", 0), v["late_signal_classes"].get("correction", 0))
+        print("%-30s %4d %5d %5s %5d %5d %8d %8d %8d %4d %6d %8d %7d %6d" % (
+            s, v["episodes"], k.get("user", 0) + k.get("midturn", 0), corr, k.get("interrupt", 0),
+            k.get("answer", 0), v["first_turn_cost_median"] // 1000, v["first_turn_total_cost_median"] // 1000,
+            v["first_turn_cost_max"] // 1000, v["subagent_runs"], v["first_turn_calls_median"],
+            v["episode_cost_median"] // 1000, v.get("skill_md_chars", 0), v.get("description_chars", 0)))
     print("always-loaded description chars (all maintained skills): %d" % summary["always_loaded_description_chars"])
     top = lambda d, n=8: ", ".join("%s %s" % (k, v) for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:n])
     print("agents (calls, failed, runs, cost total k): " + ", ".join(

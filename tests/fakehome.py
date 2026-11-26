@@ -64,6 +64,66 @@ def transcript(start):
     return "\n".join(json.dumps(dict(base, uuid="u%d" % i, **r)) for i, r in enumerate(recs)) + "\n"
 
 
+SESSION2 = "0a1b2c3d-0000-4000-8000-000000000002"
+AGENT_USAGE = {"input_tokens": 500, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 4000,
+               "output_tokens": 200}
+
+
+def transcript2(start):
+    """kit:helper starts a background agent (which starts one of its own), is corrected twice within the follow-up
+    window, then the user moves on to unrelated work in the same session (two late messages)."""
+    t = lambda minutes: iso(start + dt.timedelta(minutes=minutes))
+    base = {"sessionId": SESSION2, "cwd": "/tmp/demo", "gitBranch": "main", "version": "2.9.0", "isSidechain": False}
+    usage = {"input_tokens": 800, "cache_creation_input_tokens": 2000, "cache_read_input_tokens": 6000,
+             "output_tokens": 300}
+    say = lambda i, m, text: {"type": "assistant", "timestamp": t(m), "message": {
+        "id": "msg_k%d" % i, "role": "assistant", "model": "claude-x", "usage": usage,
+        "content": [{"type": "text", "text": text}]}}
+    typed = lambda m, text: {"type": "user", "timestamp": t(m), "message": {"role": "user", "content": text}}
+    recs = [
+        typed(0, "<command-name>/kit:helper</command-name>\n<command-args>sprint</command-args>"),
+        {"type": "user", "isMeta": True, "timestamp": t(0), "message": {"role": "user", "content":
+            "Base directory for this skill: /tmp/skills/kit/skills/helper\n\n# helper\nHelp."}},
+        {"type": "assistant", "timestamp": t(1), "message": {"id": "msg_k0", "role": "assistant", "model": "claude-x",
+            "usage": usage, "content": [{"type": "tool_use", "id": "tu_a1", "name": "Agent", "input": {
+                "subagent_type": "Explore", "description": "scan the sprint", "run_in_background": True}}]}},
+        # Background agents report no tokens here: only an id that names their own transcript.
+        {"type": "user", "timestamp": t(1), "toolUseResult": {"agentId": "aaa111", "isAsync": True,
+            "status": "async_launched"}, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_a1", "content": "Async agent launched"}]}},
+        say(1, 5, "Here is the sprint summary."),
+        typed(6, "no, include the blocked items too"),            # n=1 correction (counts)
+        say(2, 7, "Added the blocked items."),
+        typed(8, "ok"),                                           # n=2 approval
+        say(3, 9, "Anything else?"),
+        typed(10, "rename the heading to Sprint risks"),          # n=3 correction (counts)
+        say(4, 11, "Renamed."),
+        typed(12, "now draft the release notes for the mobile app"),   # n=4: other work, late
+        say(5, 13, "Drafted."),
+        typed(14, "make them shorter"),                           # n=5: late
+        typed(15, "<command-name>/clear</command-name>"),
+    ]
+    return "\n".join(json.dumps(dict(base, uuid="k%d" % i, **r)) for i, r in enumerate(recs)) + "\n"
+
+
+def subagent_files(folder):
+    """<session>/subagents/: the background agent (2 API calls) and the agent it started (1 call)."""
+    def log(agent_id, n_calls, child=None):
+        recs = []
+        for i in range(n_calls):
+            content = [{"type": "text", "text": "working"}]
+            if child and i == 0:
+                content = [{"type": "tool_use", "id": child, "name": "Agent", "input": {"subagent_type": "general"}}]
+            recs.append({"type": "assistant", "isSidechain": True, "agentId": agent_id, "message": {
+                "id": "msg_%s_%d" % (agent_id, i), "role": "assistant", "model": "claude-y", "usage": AGENT_USAGE,
+                "content": content}})
+        return "\n".join(json.dumps(r) for r in recs) + "\n"
+    write(os.path.join(folder, "agent-aaa111.jsonl"), log("aaa111", 2, child="tu_n1"))
+    write(os.path.join(folder, "agent-aaa111.meta.json"), json.dumps({"agentType": "Explore", "toolUseId": "tu_a1"}))
+    write(os.path.join(folder, "agent-bbb222.jsonl"), log("bbb222", 1))
+    write(os.path.join(folder, "agent-bbb222.meta.json"), json.dumps({"agentType": "general", "toolUseId": "tu_n1"}))
+
+
 def git(args, cwd, env):
     subprocess.run(["git"] + args, cwd=cwd, env=env, check=True, capture_output=True)
 
@@ -92,6 +152,9 @@ def build(tmp):
     write(os.path.join(tmp, "project", ".claude", "settings.local.json"), json.dumps({
         "permissions": {"allow": ["Bash(curl -H 'x-api-key: %s' https://example.invalid)" % fake_secret()]}}))
     write(os.path.join(claude, "projects", "-tmp-demo", SESSION + ".jsonl"), transcript(start))
+    write(os.path.join(claude, "projects", "-tmp-demo", SESSION2 + ".jsonl"),
+          transcript2(start + dt.timedelta(minutes=30)))
+    subagent_files(os.path.join(claude, "projects", "-tmp-demo", SESSION2, "subagents"))
     write(os.path.join(claude, "projects", "-tmp-demo", "memory", "MEMORY.md"),
           "- [Short replies](short-replies.md) - keep replies short\n")
     write(os.path.join(claude, "projects", "-tmp-demo", "memory", "short-replies.md"),

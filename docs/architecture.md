@@ -32,9 +32,14 @@ gap). For each episode the collector keeps:
 
 - **signals** from you only: typed messages, messages typed while work ran, menu answers, interrupts, refused tool
   permissions — each with `n` (how many typed replies came before it; `n=1` is the first reaction) and a first-guess
-  class (approval, new work, correction);
+  class (approval, new work, correction). Signals after the first `followup_window` replies (default 3) are marked
+  **late**: once a skill has finished, people often go on to other work in the same session, and those messages would
+  otherwise count as corrections of the skill. Late signals stay in the episode for the reviewer; they are not counted;
 - **cost**: tokens of the skill's own run (from the call to your first typed reply) and of the whole episode, as an
-  input-token-equivalent `cost_index` (input ×1, cache write ×1.25 or ×2, cache read ×0.1, output ×5);
+  input-token-equivalent `cost_index` (input ×1, cache write ×1.25 or ×2, cache read ×0.1, output ×5). The subagents a
+  run starts are charged to it from their own transcripts (`<session>/subagents/`, linked by the call that started
+  them, nested agents included), because background agents report no tokens to the main transcript. `first_turn_total`
+  adds them in: moving work into a subagent moves its cost, it does not remove it;
 - **shape**: tools used, largest tool results, repeated reads, errors, models, outward actions (pushes, forge writes) and
   whether an approval came before them.
 
